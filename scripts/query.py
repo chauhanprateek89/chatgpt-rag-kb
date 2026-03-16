@@ -33,6 +33,7 @@ DEFAULT_EMBED_MODEL = "nomic-embed-text"
 DEFAULT_DB_PATH = "./chroma_db"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_TOP_K = 5
+MAX_HISTORY_TURNS = 6
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +67,11 @@ def parse_args() -> argparse.Namespace:
         "--show-sources",
         action="store_true",
         help="Show the retrieved note sources after the answer.",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Start a persistent CLI chat session instead of a single question.",
     )
     args = parser.parse_args()
     if args.top_k <= 0:
@@ -192,7 +198,24 @@ def query_collection(collection: Any, embedding: list[float], top_k: int) -> dic
     )
 
 
-def build_prompt(question: str, documents: list[str], metadatas: list[dict[str, Any]]) -> str:
+def format_history(history: list[dict[str, str]]) -> str:
+    if not history:
+        return ""
+
+    recent_turns = history[-MAX_HISTORY_TURNS:]
+    lines = []
+    for turn in recent_turns:
+        lines.append(f"User: {turn['question']}")
+        lines.append(f"Assistant: {turn['answer']}")
+    return "\n".join(lines)
+
+
+def build_prompt(
+    question: str,
+    documents: list[str],
+    metadatas: list[dict[str, Any]],
+    history: list[dict[str, str]] | None = None,
+) -> str:
     context_sections = []
     for index, document in enumerate(documents, start=1):
         metadata = metadatas[index - 1] if index - 1 < len(metadatas) else {}
@@ -203,17 +226,25 @@ def build_prompt(question: str, documents: list[str], metadatas: list[dict[str, 
         )
 
     context = "\n\n".join(context_sections)
+    history_block = format_history(history or [])
+    history_section = (
+        f"Recent conversation:\n{history_block}\n\n"
+        if history_block
+        else ""
+    )
     return (
         "You are answering questions using a private ChatGPT knowledge base.\n"
         "Use only the retrieved context below. If the answer is not supported by the "
         "context, say so clearly.\n\n"
+        f"{history_section}"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n\n"
         "Answer:"
     )
 
 
-def stream_answer(client: str, model: str, prompt: str, console: Any) -> None:
+def stream_answer(client: str, model: str, prompt: str, console: Any) -> str:
+    answer_parts: list[str] = []
     try:
         body = json.dumps(
             {
@@ -247,11 +278,13 @@ def stream_answer(client: str, model: str, prompt: str, console: Any) -> None:
                 content = message.get("content", "")
                 if not content:
                     continue
+                answer_parts.append(content)
                 if console is not None:
                     console.print(content, end="")
                 else:
                     print(content, end="", flush=True)
         print()
+        return "".join(answer_parts).strip()
     except error.HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         raise OllamaError(details or str(exc)) from exc
@@ -275,18 +308,7 @@ def print_sources(console: Any, metadatas: list[dict[str, Any]], distances: list
             print_line(console, f"{index}. {title} [{source_file}] distance={distance:.4f}")
 
 
-def main() -> None:
-    args = parse_args()
-    if not check_runtime_dependencies():
-        raise SystemExit(1)
-
-    settings = load_settings(args)
-    question = (args.question or prompt_for_question()).strip()
-    if not question:
-        print("A question is required.")
-        raise SystemExit(1)
-
-    db_path = settings["db_path"]
+def load_collection(db_path: Path) -> Any:
     if not db_path.exists():
         print(f"ChromaDB path not found: {db_path}")
         print("Build the vector store first with: python scripts/build_vectorstore.py")
@@ -300,22 +322,30 @@ def main() -> None:
     )
     client = chromadb.Client(chroma_settings)
     try:
-        collection = client.get_collection(COLLECTION_NAME)
+        return client.get_collection(COLLECTION_NAME)
     except Exception:
         print("Collection 'chatgpt_kb' was not found.")
         print("Build the vector store first with: python scripts/build_vectorstore.py")
         raise SystemExit(1)
 
-    ollama_client = create_ollama_client(settings["ollama_base_url"])
-    console = create_console()
 
+def run_question(
+    question: str,
+    collection: Any,
+    settings: dict[str, Any],
+    top_k: int,
+    show_sources: bool,
+    console: Any,
+    history: list[dict[str, str]] | None = None,
+) -> str:
+    ollama_client = create_ollama_client(settings["ollama_base_url"])
     try:
         question_embedding = embed_text(
             ollama_client,
             question,
             settings["embed_model"],
         )
-        results = query_collection(collection, question_embedding, args.top_k)
+        results = query_collection(collection, question_embedding, top_k)
     except OllamaConnectionError:
         print_ollama_error(settings["model"], settings["embed_model"])
         raise SystemExit(1)
@@ -331,14 +361,14 @@ def main() -> None:
     top_distances = distances[0] if distances else []
 
     if not top_documents:
-        print("No relevant note chunks were found in the vector store.")
-        raise SystemExit(0)
+        print_line(console, "No relevant note chunks were found in the vector store.")
+        return ""
 
-    prompt = build_prompt(question, top_documents, top_metadatas)
+    prompt = build_prompt(question, top_documents, top_metadatas, history=history)
 
     print_line(console, "Answer:\n")
     try:
-        stream_answer(ollama_client, settings["model"], prompt, console)
+        answer = stream_answer(ollama_client, settings["model"], prompt, console)
     except OllamaConnectionError:
         print_ollama_error(settings["model"], settings["embed_model"])
         raise SystemExit(1)
@@ -346,8 +376,89 @@ def main() -> None:
         print_ollama_error(settings["model"], settings["embed_model"])
         raise SystemExit(1)
 
-    if args.show_sources:
+    if show_sources:
         print_sources(console, top_metadatas, top_distances)
+
+    return answer
+
+
+def run_interactive_session(
+    collection: Any,
+    settings: dict[str, Any],
+    top_k: int,
+    show_sources: bool,
+    console: Any,
+) -> None:
+    history: list[dict[str, str]] = []
+    print_line(console, "Interactive RAG chat. Type /exit to quit, /sources to toggle sources.")
+
+    show_sources_in_session = show_sources
+    while True:
+        try:
+            question = input("\nYou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not question:
+            continue
+        if question.lower() in {"/exit", "/quit"}:
+            break
+        if question.lower() == "/sources":
+            show_sources_in_session = not show_sources_in_session
+            state = "on" if show_sources_in_session else "off"
+            print_line(console, f"Sources are now {state}.")
+            continue
+        if question.lower() == "/help":
+            print_line(console, "Commands: /help, /sources, /exit")
+            continue
+
+        print_line(console, "")
+        answer = run_question(
+            question=question,
+            collection=collection,
+            settings=settings,
+            top_k=top_k,
+            show_sources=show_sources_in_session,
+            console=console,
+            history=history,
+        )
+        if answer:
+            history.append({"question": question, "answer": answer})
+
+
+def main() -> None:
+    args = parse_args()
+    if not check_runtime_dependencies():
+        raise SystemExit(1)
+
+    settings = load_settings(args)
+    console = create_console()
+    collection = load_collection(settings["db_path"])
+
+    if args.interactive or not args.question:
+        run_interactive_session(
+            collection=collection,
+            settings=settings,
+            top_k=args.top_k,
+            show_sources=args.show_sources,
+            console=console,
+        )
+        return
+
+    question = args.question.strip()
+    if not question:
+        print("A question is required.")
+        raise SystemExit(1)
+
+    run_question(
+        question=question,
+        collection=collection,
+        settings=settings,
+        top_k=args.top_k,
+        show_sources=args.show_sources,
+        console=console,
+    )
 
 
 if __name__ == "__main__":
