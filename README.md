@@ -1,8 +1,13 @@
 # chatgpt-rag-kb
 
 ## Overview
-This project converts a ChatGPT data export (`conversations.json`) into Obsidian-compatible markdown notes.
-It then builds a local RAG (Retrieval-Augmented Generation) pipeline using ChromaDB as the vector store and Ollama to run a local LLM.
+This project converts a ChatGPT data export (`data/raw/conversations.json`) into
+Obsidian-compatible markdown notes in `notes/`.
+
+It then builds a local RAG (Retrieval-Augmented Generation) pipeline using:
+- ChromaDB for the persistent vector store
+- Ollama embeddings for chunk indexing
+- Ollama chat models for grounded local answers
 
 ## Folder Structure
 ```text
@@ -32,10 +37,23 @@ chatgpt-rag-kb/
    cp .env.example .env
    ```
 
+## Configuration
+The main runtime settings live in `.env`:
+
+```bash
+OLLAMA_MODEL=llama3
+EMBED_MODEL=nomic-embed-text
+CHROMA_DB_PATH=./chroma_db
+NOTES_PATH=./notes
+CHUNK_SIZE=500
+CHUNK_OVERLAP=50
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
 ## Usage
 1. Parse ChatGPT export into markdown notes:
    ```bash
-   python scripts/parse_chatgpt.py
+    python scripts/parse_chatgpt.py
    ```
 2. Build ChromaDB vector store from notes:
    ```bash

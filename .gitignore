@@ -1,9 +1,14 @@
 __pycache__/
 *.pyc
 .env
+.venv*/
+.py312pkgs/
 data/raw/
+data/processed/
+notes/
 *.zip
 chroma_db/
+chroma_db*/
 *.egg-info/
 dist/
 .ipynb_checkpoints/

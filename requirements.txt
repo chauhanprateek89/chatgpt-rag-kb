@@ -1,8 +1,7 @@
-langchain
-langchain-community
 chromadb
+chroma-hnswlib
 ollama
 python-dotenv
 tqdm
 tiktoken
-sentence-transformers
+rich
