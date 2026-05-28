@@ -12,3 +12,4 @@ chroma_db*/
 *.egg-info/
 dist/
 .ipynb_checkpoints/
+.claude/
