@@ -5,4 +5,4 @@ python-dotenv
 tqdm
 tiktoken
 rich
-mcp
+mcp<2  # mcp_server.py uses FastMCP, which mcp 2.x renamed to MCPServer
